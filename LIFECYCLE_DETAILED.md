@@ -4,6 +4,186 @@
 
 ---
 
+## 0. Подключение Nuxt модулей (Build Time)
+
+**Слой:** Nuxt Kit (build time)  
+**Файл:** `nuxt.config.ts` или модули в `modules/`  
+**Когда:** на этапе сборки приложения, **ДО** запуска жизненного цикла приложения (до S1).
+
+### Пример реализации модуля
+
+```typescript
+// modules/my-custom-module.ts
+import { defineNuxtModule, addPlugin, createResolver } from '@nuxt/kit'
+
+export default defineNuxtModule({
+  meta: {
+    name: 'my-custom-module',
+    configKey: 'myModule'
+  },
+  
+  defaults: {
+    apiKey: '',
+    enabled: true
+  },
+  
+  setup(options, nuxt) {
+    const resolver = createResolver(import.meta.url)
+    
+    // ЛЁГКИЕ ВЕЩИ — делаем прямо в setup()
+    // Изменение конфигурации Nuxt
+    nuxt.options.runtimeConfig.public.myModule = {
+      apiKey: options.apiKey
+    }
+    
+    // Добавление серверных утилит
+    nuxt.hook('nitro:config', (nitroConfig) => {
+      nitroConfig.experimental = nitroConfig.experimental || {}
+      nitroConfig.experimental.wasm = true
+    })
+    
+    // Хук modules:done - когда все модули установлены
+    nuxt.hook('modules:done', () => {
+      console.log('Все модули установлены')
+    })
+    
+    // Хук ready - инстанс Nuxt во время сборки/старта
+    // ⚠️ ВАЖНО: блокирует старт/сборку до завершения!
+    // Хорошее место для финального редактирования конфига и добавления плагинов
+    nuxt.hook('ready', async (nuxt) => {
+      // ТЯЖЁЛЫЕ ВЕЩИ (I/O) — делаем аккуратно здесь, чтобы не тормозить
+      // Например, чтение файлов, запросы к API и т.п.
+      const configData = await loadModuleConfig(options.configPath)
+      
+      // Финальное редактирование конфигурации
+      nuxt.options.runtimeConfig.public.myModule.config = configData
+      
+      // Добавление плагинов (всё, что должно жить на запросах/в браузере)
+      if (options.enabled) {
+        addPlugin({
+          src: resolver.resolve('./runtime/plugin'),
+          mode: 'client'
+        })
+        
+        // Runtime-плагины для сервера
+        addPlugin({
+          src: resolver.resolve('./runtime/server-plugin'),
+          mode: 'server'
+        })
+      }
+    })
+    
+    // Хук build:done - после завершения сборки
+    // В dev — после первичной сборки; не триггерится на каждый HMR
+    nuxt.hook('build:done', () => {
+      console.log('Сборка завершена')
+      // Можно делать пост-обработку собранных файлов
+    })
+    
+    // Хук close - при остановке процесса Nuxt (dev-сервер, build-процесс)
+    // Удобно для очистки временных файлов/соединений
+    nuxt.hook('close', async () => {
+      console.log('Процесс завершается, очистка ресурсов')
+      // Очистка временных файлов
+      await cleanupTempFiles()
+      // Закрытие соединений
+      await closeConnections()
+    })
+  }
+})
+```
+
+### Использование в nuxt.config.ts
+
+```typescript
+// nuxt.config.ts
+export default defineNuxtConfig({
+  modules: [
+    '@nuxtjs/tailwindcss',
+    '~/modules/my-custom-module'
+  ],
+  
+  // Конфигурация модуля
+  myModule: {
+    apiKey: process.env.MY_API_KEY,
+    enabled: true
+  },
+  
+  // Хуки на уровне конфигурации
+  hooks: {
+    'modules:done': () => {
+      console.log('Все модули установлены из конфига')
+    },
+    'ready': (nuxt) => {
+      console.log('Nuxt готов из конфига')
+    },
+    'build:done': () => {
+      console.log('Сборка завершена из конфига')
+    },
+    'close': () => {
+      console.log('Процесс завершается из конфига')
+    }
+  }
+})
+```
+
+### Ключевые хуки для модулей
+
+- **`modules:done`** — срабатывает после того, как все модули из массива `modules` в `nuxt.config.ts` были установлены. Это момент, когда все модули выполнили свою функцию `setup()`.
+
+- **`ready`** — хук инстанса Nuxt во время сборки/старта (не рантайм при запросе!). **Важно:** блокирует старт/сборку до завершения. Хорошее место для:
+  - финального редактирования конфигурации
+  - добавления плагинов
+  - выполнения тяжёлых операций (I/O), которые нужно сделать аккуратно, чтобы не тормозить
+
+- **`build:done`** — вызывается после завершения сборки. В dev-режиме — после первичной сборки; **не триггерится на каждый HMR**.
+
+- **`close`** — при остановке процесса Nuxt (dev-сервер, build-процесс). Удобно для очистки временных файлов/соединений.
+
+### Важные детали и рекомендации
+
+- Модули выполняются **синхронно** в порядке их объявления в массиве `modules`
+- Модули имеют доступ к объекту `nuxt` и могут изменять конфигурацию через `nuxt.options`
+- Модули могут добавлять плагины, компоненты, composables, middleware и другие ресурсы
+- Хуки модулей выполняются **до** жизненного цикла приложения (до S1)
+- Модули могут подписываться на хуки сборки через `nuxt.hook()`
+
+**Рекомендации по организации кода в модуле:**
+
+- **Лёгкие вещи** — делайте прямо в `setup()`:
+  - Изменение конфигурации
+  - Регистрация хуков
+  - Добавление простых ресурсов
+
+- **Тяжёлые операции (I/O)** — откладывайте или делайте аккуратно в `ready`:
+  - Чтение файлов
+  - Запросы к API
+  - Инициализация внешних сервисов
+  - ⚠️ Помните: `ready` блокирует старт/сборку до завершения!
+
+- **Всё, что должно жить на запросах/в браузере** — выносите в runtime-плагины/handlers:
+  - Логика, выполняемая при каждом запросе
+  - Инициализация клиентских библиотек
+  - Серверные обработчики запросов
+  - Модуль добавляет эти плагины через `addPlugin()`
+
+### Порядок выполнения модулей
+
+```
+1. Чтение nuxt.config.ts
+2. Установка модулей (в порядке объявления)
+   → modules:done
+3. Подготовка конфигурации
+   → ready
+4. Сборка приложения (если production)
+   → build:done
+5. Запуск жизненного цикла приложения (S1 → S5 → C1 → ...)
+6. Завершение процесса
+   → close
+```
+
+---
+
 ## 1. Серверный middleware (S1: Nitro/H3)
 
 **Слой:** Nitro/H3 (сервер)  
@@ -81,13 +261,13 @@ function generateTraceId(): string {
 ## 2. Серверная инициализация приложения (S2)
 
 **Слой:** Nuxt (сервер)  
-**Файл:** `plugins/server-init.ts`  
+**Файл:** `app/plugins/server-init.ts`  
 **Когда:** на каждый SSR-запрос; после инициализации Nuxt-приложения, в конце этапа вызывается хук `app:created`.
 
 ### Пример реализации
 
 ```typescript
-// plugins/server-init.ts
+// app/plugins/server-init.ts
 
 export default defineNuxtPlugin(async (nuxtApp) => {
   // Инициализация серверных сервисов
@@ -139,13 +319,13 @@ class AuthenticationService {
 ## 3. Route Middleware (S3)
 
 **Слой:** Nuxt (сервер)  
-**Файл:** `middleware/trace.global.ts`  
+**Файл:** `app/middleware/trace.global.ts`  
 **Когда:** перед первым SSR-рендером конкретной страницы. (Ещё раз будет в браузере — см. C2.)
 
 ### Пример реализации
 
 ```typescript
-// middleware/trace.global.ts
+// app/middleware/trace.global.ts
 
 export default defineNuxtRouteMiddleware(async (to, from) => {
   // Расширенная логика маршрутизации
@@ -204,13 +384,13 @@ function hasRequiredPermissions(user, requiredPermissions) {
 ## 4. Серверный Setup корневого компонента (S4)
 
 **Слой:** Nuxt/Vue (сервер)  
-**Файл:** `app.vue`  
+**Файл:** `app/app.vue`  
 **Когда:** в начале SSR-рендера дерева компонентов (после S3).
 
 ### Пример реализации
 
 ```typescript
-// app.vue
+// app/app.vue
 
 export default defineComponent({
   setup() {
@@ -261,13 +441,13 @@ export default defineComponent({
 ## 5. Setup страницы (S5)
 
 **Слой:** Nuxt/Vue (сервер)  
-**Файл:** `pages/index.vue`  
+**Файл:** `app/pages/index.vue`  
 **Когда:** после S4; здесь же выполняются асинхронные загрузки данных.
 
 ### Пример реализации
 
 ```typescript
-// pages/index.vue
+// app/pages/index.vue
 
 export default defineComponent({
   async setup() {
@@ -763,15 +943,23 @@ C2 (Route Middleware)
 
 ## Полный жизненный цикл Nuxt 4
 
-Объединение серверных и клиентских этапов:
+Объединение всех этапов от сборки до выполнения:
 
 ```
+[BUILD TIME]
+Модули (modules:done → ready → build:done)
+
 [СЕРВЕР]
 S1 → S2 → S3 → S4 → S5 → [HTML отправлен в браузер]
 
 [КЛИЕНТ]
 C1 → C2 → C3 → C4 → C5 → C6 → C7 → C8 → C10 → C11 → C12 → C9
+
+[ЗАВЕРШЕНИЕ]
+close
 ```
+
+**Важно:** Модули выполняются на этапе сборки (build time) **ДО** запуска жизненного цикла приложения. Они подготавливают конфигурацию, добавляют плагины, компоненты и другие ресурсы, которые затем используются в серверных и клиентских этапах.
 
 Каждый этап выполняет свою роль в создании полнофункционального, производительного и безопасного приложения с SSR и клиентской гидратацией.
 
